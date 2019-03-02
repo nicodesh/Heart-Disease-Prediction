@@ -7,6 +7,8 @@ from sklearn.metrics import r2_score
 
 import scipy.stats as st
 import statsmodels.api as sm
+from statsmodels.formula.api import ols
+from statsmodels.stats.anova import anova_lm
 
 from descstats import MyPlot, Univa
 
@@ -74,8 +76,7 @@ class LogReg():
         """ The constructor of the class
         Args:
             data (Pandas dataframe): The first columns should be the independant variables.
-            The last one should b the X variable.
-            kind (string): simple or multiple linear regression.
+            The last one should be the X variable.
         """
         
         self.data = data.copy()
@@ -180,11 +181,18 @@ class LogReg():
         # Plot the results
         fig, ax = plt.subplots(figsize=(10,6))
         plt.plot(roc_x, roc_y)
+
+        # Plot the bisectrix
+        plt.plot([0, 1], [0, 1], linestyle='dashed', alpha=0.5)
+
+        # Set the axe limits
+        plt.axis((-0.005, 1, 0, 1.005))
+
         MyPlot.bg(ax)
         MyPlot.border(ax)
         MyPlot.title(ax, 'The ROC Curve')
         MyPlot.labels(ax, "1 - Specificity", "Sensibility")
-        plt.show()
+        #plt.show()
         
     def plot(self):
         """ Plot the scatter plot and the probability by class. """
@@ -228,15 +236,22 @@ class LogReg():
         
     def infos(self):
         """ Returns useful infos"""
-        
+
         print(f"{len(self.model.params)} parameters (including the intercept)")
-        print("")
+        ainfos = []
         for i, x in enumerate(self.model.params):
-            print(f"B{i+1}:")
-            print(f"Coeff: {x}")
-            print(f"OR: {np.exp(x)}")
-            print(f"P-Value: {self.model.pvalues[i]}")
-            print("")        
+            ainfos.append({
+                'name': f"B{i+1}",
+                'Coeff': x,
+                'OR': np.exp(x),
+                'P-Value': self.model.pvalues[i]
+                })
+
+        dfinfos = pd.DataFrame(ainfos)
+        dfinfos.set_index(dfinfos['name'], inplace=True)
+        dfinfos.index.rename(None, inplace=True)
+        dfinfos.drop("name", axis=1, inplace=True)
+        display(dfinfos)
 
         data = {
             'y = 1':[self.true_pos, self.false_neg, self.pos_data],
@@ -246,6 +261,7 @@ class LogReg():
 
         df = pd.DataFrame(data=data, columns=['y = 1', 'y = 0', 'Total'], index=['Predict 1', 'Predict 0', 'Total'])
 
+        print("Matrice de confusion:")
         display(df)
         print("")
         print(f"Success rate: {self.success_rate:.2%}")
@@ -284,3 +300,111 @@ class LogReg():
         
         else:
             return 0
+
+
+class OWAnova():
+    """ Copute ANOVA model. """
+
+    def __init__(self, x, y):
+        """ Constructor of the class.
+        Args:
+            x (Pandas Series): a qualitative variable.
+            y (Pandas Series): a quantitative variable.
+        """
+
+        self.x = x.copy()
+        self.y = y.copy()
+        self.mean = y.mean()
+
+        self.classes = []
+
+        for i, the_class in enumerate(self.x.unique()):
+
+            # Keep x var of the specific class
+            yi_class = y[self.x == the_class]
+
+            # First class is the Intercept. Its alpha is 0
+            if (i == 0):
+                self.mean0 = yi_class.mean()
+
+            # Add all the class info in the classes array
+            self.classes.append({
+                                    'name': the_class,
+                                    'ni': len(yi_class),
+                                    'mean': yi_class.mean(),
+                                    'alpha': yi_class.mean() - self.mean0
+                                })
+
+        # Somme des carrés totaux (SCT) / Total Sum of Squares (TSS)
+        self.sct = sum([(yj - self.mean)**2 for yj in self.y])
+
+        # Sommes des carrés expliqués (SCE) / Sum of Squares of the Model (SSM)
+        self.sce = sum([c['ni'] * (c['mean'] - self.mean)**2 for c in self.classes])
+
+        # Sommes des carrés résiduels (SCR) / Sum of Squares of the Error (SSE)
+        self.scr = sum([sum([(yij - c['mean'])**2  for yij in self.y[self.x == c['name']]]) for c in self.classes])
+
+        # Eta squared (Pourcentage de la variance expliquée par le modèle)
+        self.eta_squared = self.sce / self.sct
+
+        # Carré Moyen Expliqué (CME)
+        self.cme = self.sce / (len(self.classes) - 1)
+
+        # Carré Moyen Résiduel (CMR)
+        self.cmr = self.scr / (len(self.x) - len(self.classes))
+
+        # F-Stat + test de Fisher
+        dofnum = len(self.classes) - 1
+        dofden = len(self.x) - len(self.classes)
+        self.fstat = self.cme / self.cmr
+        self.fdistrib = st.f(dofnum, dofden)
+        self.pvalue = self.fdistrib.sf(self.fstat)
+
+        # F-Stat et test de Fisher avec scipy.stats
+        samples = []
+        for the_class in self.x.unique():
+            samples.append(y[x.values == the_class])
+            
+        self.scipy = st.f_oneway(*samples)
+
+    def summary(self):
+        """ Display all informations in a Dataframe. """
+        
+        df = pd.DataFrame(self.classes, columns=['name', 'mean', 'alpha', 'ni'])
+        df.set_index(df.name, inplace=True)
+        df.drop('name', axis=1, inplace=True)
+        df.index.rename(None, inplace=True)
+        df = df[['mean', 'alpha', 'ni']]
+        display(df)
+
+        df = pd.DataFrame(data={
+                            'Eta Squared':[self.eta_squared],
+                            'F-Stat':[self.scipy.statistic],
+                            'P-Value':[self.scipy.pvalue]
+        })
+        display(df)
+
+class TWAnova():
+    """ Perform two ways ANOVA with statsmodels. """
+
+    def __init__(self, data, a, b, y):
+        """ The instance constructor.
+        Args:
+            data (Pandas dataframe): The dataframe with all data.
+            a (String): The name of the first explicative variable column.
+            b (String): The name of the second explicative variable column.
+            y (String): The name of the Y variable column.
+        """
+
+        self.data = data.copy()
+        self.a = a
+        self.b = b
+        self.y = y
+
+        formula = f"{self.y} ~ C({self.a}) + C({self.b}) + C({self.a}):C({self.b})"
+        model = ols(formula, self.data).fit()
+        self.aov_table = anova_lm(model, typ=2)
+
+        # Add Eta squared in the table
+        self.aov_table['eta_sq'] = 'NaN'
+        self.aov_table['eta_sq'] = self.aov_table[:-1]['sum_sq']/sum(self.aov_table['sum_sq'])
